@@ -1,448 +1,391 @@
 # Type-Agnostic Message Evolution Plan for `frms-coe-lib`
 
-## Executive Summary
+## Summary
 
-This document defines a concrete, low-risk evolution path to make `frms-coe-lib` accept first-class custom message types while preserving existing behavior for current ISO message families (`pacs.002.001.12`, `pacs.008.001.10`, `pain.001.001.11`, `pain.013.001.09`).
+This planning document proposes a safe, incremental way to let `frms-coe-lib` support first-class custom message types while preserving existing behavior for today’s built-in ISO flows.
 
-The core approach is:
+The guiding principle is **extension without disruption**:
 
-1. Introduce a **generic base transaction contract** and generic request/report/db interfaces.
-2. Keep current APIs as **backward-compatible aliases/wrappers**.
-3. Add one **generic raw-history API** and one **generic evaluation API**, while retaining existing methods untouched for compatibility.
-4. Make Redis/protobuf message handling support a **pluggable codec registry** (default codec preserves current FRMS protobuf behavior).
-5. Preserve all existing semantics (DB conflict keys, route logic, condition models, processor config behavior), changing only typing surfaces and serialization extensibility points where required.
+- keep current contracts and runtime semantics as the default path,
+- add a generic type system and codec extension path as an opt-in,
+- preserve strict TypeScript guarantees through constrained generic interfaces and default type parameters,
+- roll out in phases with explicit compatibility checkpoints.
 
-This allows existing consumers to continue working unchanged, while new consumers can register and use custom message types with full TypeScript support.
+Expected outcome:
 
----
-
-## 1. Goals and Non-Goals
-
-### Goals
-
-- Allow application-defined transaction payloads to be type-safe through library APIs.
-- Preserve existing runtime behavior for built-in message types.
-- Minimize API breaking changes through additive design.
-- Keep the existing FRMS domain intent: message-type routing via `txTp`, event history storage, evaluation storage, and redis cache integration.
-
-### Non-Goals
-
-- Rewriting FRMS domain models (conditions, network maps, logger, apm, env config).
-- Replacing PostgreSQL or Redis architecture.
-- Removing current ISO-specific interfaces in this phase.
+- existing consumers continue to compile and run unchanged,
+- new consumers can bring their own message types safely,
+- maintainers keep operational confidence because behavior for current traffic remains stable.
 
 ---
 
-## 2. Current Constraints (Why change is required)
+## 1. Goals and Non-Goals (Concrete)
 
-The library currently hard-codes message families in critical APIs:
+### 1.1 Goals
 
-- `RawHistoryDB` stores four concrete message interfaces only.
-- `EvaluationDB`, `RuleRequest`, `TADPRequest`, `CMSRequest`, and `TADPReport` are bound to `Pacs002`.
-- Redis set/object binary paths assume `FRMSMessage` protobuf.
-- `Full.proto` enumerates only known message families and lacks a generic extension payload.
+1. **Type-agnostic acceptance:** Enable consumers to use custom transaction payloads without unsafe casts.
+2. **Strict typing retained:** Preserve strict TypeScript behavior; no shift to permissive `any`-driven APIs.
+3. **Backward compatibility:** Keep current processor and storage behavior intact for built-in message families.
+4. **Operational continuity:** Preserve current routing, condition handling, conflict semantics, and cache behavior by default.
+5. **Adoption practicality:** Make custom type usage straightforward for consumers (low ceremony, clear extension points).
 
-These constraints prevent first-class custom message typing even though `TxTp` is already modeled as a string and network map routing is message-type-keyed.
+### 1.2 Non-Goals
+
+1. Re-architecting the broader FRMS domain model.
+2. Replacing PostgreSQL, Redis, logging, APM, or configuration subsystems.
+3. Forcing immediate migration of existing processors.
+4. Removing existing built-in ISO type contracts in this initiative.
+
+### 1.3 Design Guardrails
+
+- Additive changes first; destructive changes deferred.
+- Old behavior is the reference baseline and must remain available.
+- Every new generic path must have a default compatible behavior.
+- New abstractions must map clearly to today’s operational model.
 
 ---
 
-## 3. Target Architecture (Type-Agnostic Core + Legacy Compatibility)
+## 2. How the Library Works Today (Current Process Understanding)
+
+This section explains the runtime process in practical terms for readers unfamiliar with the codebase.
+
+### 2.1 Process View A — End-to-End Functional Flow
 
 ```mermaid
-classDiagram
-  class BaseMessageEnvelope~TPayload~ {
-    +string TxTp
-    +string TenantId
-    +TPayload payload
-    +DataCache? DataCache
-  }
+flowchart TB
+  %% Accessible palette and text contrast
+  classDef input fill:#E3F2FD,stroke:#1E3A8A,color:#0F172A,stroke-width:1px;
+  classDef core fill:#E8F5E9,stroke:#166534,color:#0F172A,stroke-width:1px;
+  classDef persist fill:#FFF7ED,stroke:#9A3412,color:#0F172A,stroke-width:1px;
+  classDef support fill:#F3E8FF,stroke:#6B21A8,color:#0F172A,stroke-width:1px;
+  classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
 
-  class TransactionAdapter~TRaw,TCanonical~ {
-    +toCanonical(raw: TRaw) TCanonical
-    +fromCanonical(canonical: TCanonical) TRaw
-  }
+  IN[Incoming message + txTp + tenant context]:::input --> RT[Routing via network-map message type]:::core
+  RT --> EV[Evaluation process produces alert/report context]:::core
+  EV --> EH[Event history persistence for graph/transaction details]:::persist
+  EV --> RH[Raw-history persistence for message payload storage]:::persist
+  EV --> RC[Redis cache interactions for fast retrieval and sets]:::persist
 
-  class MessageCodec~T~ {
-    +encode(data: T) Buffer
-    +decode(buf: Buffer) T
-    +contentType() string
-  }
+  CFG[Configuration retrieval<br/>rules / typologies / network maps]:::support --> RT
+  LOG[Logger + APM observability]:::support --> EV
 
-  class MessageCodecRegistry {
-    +register(txTp: string, codec: MessageCodec<any>) void
-    +get(txTp: string) MessageCodec<any>
-  }
-
-  class RawHistoryDBGeneric {
-    +saveTransactionHistory(txTp: string, transaction: unknown) Promise~void~
-    +getTransaction(txTp: string, idKey: string, tenantId: string) Promise~unknown|undefined~
-  }
-
-  class EvaluationDBGeneric~TTransaction~ {
-    +saveEvaluationResult(transactionID: string, transaction: TTransaction, networkMap: NetworkMap, alert: Alert, dataCache?: DataCache) Promise~void~
-  }
-
-  MessageCodecRegistry --> MessageCodec
-  RawHistoryDBGeneric --> BaseMessageEnvelope
-  EvaluationDBGeneric --> BaseMessageEnvelope
+  N1[Reference: Process View B for storage internals]:::note
+  N2[Reference: Process View C for message serialization]:::note
+  EH --> N1
+  RH --> N1
+  RC --> N2
 ```
 
-### Compatibility principle
-
-Existing built-in models become **specializations** of the generic contract, not replaced.
+### 2.2 Process View B — Storage Behavior (Current)
 
 ```mermaid
 flowchart LR
-  A[Existing ISO-specific APIs] --> B[Compatibility wrappers]
-  B --> C[New generic core APIs]
-  C --> D[Existing DB semantics and routing semantics unchanged]
+  classDef persist fill:#FFF7ED,stroke:#9A3412,color:#0F172A,stroke-width:1px;
+  classDef detail fill:#ECFEFF,stroke:#155E75,color:#0F172A,stroke-width:1px;
+  classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
+
+  RH[Raw History]:::persist --> RH1[Built-in message family specific write paths]:::detail
+  RH --> RH2[Specific retrieval paths for selected message families]:::detail
+
+  EH[Event History]:::persist --> EH1[Transaction detail write with conflict protections]:::detail
+  EH --> EH2[Condition graph edges + condition lifecycle updates]:::detail
+
+  EV[Evaluation Store]:::persist --> EV1[Evaluation report persisted with transaction payload]:::detail
+
+  NPREV[Reference: Process View A]:::note
+  NNEXT[Reference: Process View C]:::note
+  NPREV --> RH
+  RH --> NNEXT
 ```
 
----
+### 2.3 Process View C — Serialization and Type Handling (Current)
 
-## 4. Concrete Change Set (File-by-file)
+```mermaid
+flowchart TB
+  classDef ser fill:#F3E8FF,stroke:#6B21A8,color:#0F172A,stroke-width:1px;
+  classDef built fill:#E8F5E9,stroke:#166534,color:#0F172A,stroke-width:1px;
+  classDef risk fill:#FEE2E2,stroke:#991B1B,color:#0F172A,stroke-width:1px;
+  classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
 
-## 4.1 New generic interfaces (additive)
+  ST[Type contracts exposed to consumers]:::ser --> B1[Built-in transaction families are strongly modeled]:::built
+  ST --> B2[Several request/report/evaluation contracts expect one built-in family]:::built
 
-### Add: `src/interfaces/message/BaseMessage.ts`
+  S1[Binary message paths use FRMS protobuf schema]:::ser --> R1[Custom payloads cannot be first-class typed on that path today]:::risk
+  S2[Routing key txTp is already string-based]:::ser --> O1[Potential extension seam exists]:::built
 
-Define core generic contracts:
-
-- `BaseMessageEnvelope<TPayload = unknown>`
-- `BuiltInTxType = 'pacs.002.001.12' | 'pacs.008.001.10' | 'pain.001.001.11' | 'pain.013.001.09'`
-- `TransactionLike<TPayload = unknown> = { TxTp: string; TenantId: string } & TPayload`
-
-Justification:
-- Needed to represent custom payloads without losing `TxTp`/`TenantId`, which are foundational for current persistence/routing semantics.
-
-### Add: `src/interfaces/message/MessageCodec.ts`
-
-Define pluggable serialization:
-
-- `MessageCodec<T>` (`encode`, `decode`, `contentType`)
-- `MessageCodecRegistry` interface
-
-Justification:
-- Current FRMS protobuf codec is hardcoded; this introduces extension without changing default behavior.
-
-### Update: `src/interfaces/index.ts`
-
-Export new message interfaces.
-
-Justification:
-- Public typing surface must expose generic contracts.
-
----
-
-## 4.2 Generic DB interfaces (additive + aliasing)
-
-### Update: `src/interfaces/database/RawHistoryDB.ts`
-
-Add generic methods while preserving existing methods:
-
-- `saveTransactionHistory<TTransaction>(txTp: string, transaction: TTransaction): Promise<void>`
-- `getTransaction<TTransaction>(txTp: string, id: string, tenantId: string): Promise<TTransaction | undefined>`
-
-Keep existing methods:
-
-- `saveTransactionHistoryPain001`, `saveTransactionHistoryPain013`, `saveTransactionHistoryPacs008`, `saveTransactionHistoryPacs002`, `getTransactionPacs008`
-
-Justification:
-- Existing users must not break.
-- Generic path is required for custom type support.
-
-### Update: `src/interfaces/database/EvaluationDB.ts`
-
-Make generic transaction type parameterized:
-
-- `export interface EvaluationDB<TTransaction = Pacs002> { ... }`
-- `saveEvaluationResult(..., transaction: TTransaction, ...)`
-
-Justification:
-- Existing default remains `Pacs002`; custom consumers can opt-in by binding `TTransaction`.
-
-### Update: `src/interfaces/processor-files/TADPReport.ts`
-
-- `Evaluation<TTransaction = Pacs002>` with `transaction: TTransaction`
-
-### Update: `src/interfaces/processor-files/TADPRequest.ts`
-
-- `TADPRequest<TTransaction = Pacs002>` with `transaction: TTransaction`
-
-### Update: `src/interfaces/processor-files/CMSRequest.ts`
-
-- `CMSRequest<TTransaction = Pacs002>` with `transaction: TTransaction`
-
-### Update: `src/interfaces/rule/RuleRequest.ts`
-
-- `RuleRequest<TTransaction = Pacs002>` with `transaction: TTransaction`
-
-Justification for all above:
-- These are currently the main compile-time blockers for custom message types.
-- Default generic parameter preserves current API shape and existing downstream behavior.
-
----
-
-## 4.3 Builder implementations
-
-### Update: `src/builders/rawHistoryBuilder.ts`
-
-Implement generic methods and keep current wrappers:
-
-- `saveTransactionHistory(txTp, transaction)` dispatches to storage strategy by `txTp`.
-- `getTransaction(txTp, id, tenantId)` generic retrieval.
-- Existing methods call the generic method internally.
-
-Storage strategy options:
-
-1. **Preferred (minimal schema drift)**: add a generic table (e.g., `raw_transaction`) with columns:
-   - `txTp`, `tenantId`, `endToEndId` (or messageId), `document` jsonb, `createdAt`
-2. **No-schema-immediate**: txTp-to-table map config, still allows custom tx types if table exists.
-
-Justification:
-- Necessary to support unknown tx types without adding one method/table per type.
-- Existing methods remain exact, so current processors continue unchanged.
-
-### Update: `src/builders/evaluationBuilder.ts`
-
-- Make function generic: `evaluationBuilder<TTransaction>(manager: EvaluationDB<TTransaction>, ...)`
-- Persist generic `Evaluation<TTransaction>` payload unchanged.
-
-Justification:
-- Evaluation data path currently enforces `Pacs002`; this is a direct blocker.
-
----
-
-## 4.4 Database manager typing glue
-
-### Update: `src/services/dbManager.ts`
-
-- Extend manager type composition to preserve generic DB interfaces while defaulting to current behavior.
-- Ensure `CreateDatabaseManager` return type remains backward compatible when generics not specified.
-
-Recommended pattern:
-
-- Add optional generic parameter with default:
-  - `CreateDatabaseManager<TConfig extends ManagerConfig, TTransaction = Pacs002>(config: TConfig): Promise<DatabaseManagerInstance<TConfig, TTransaction>>`
-
-Justification:
-- This is where all composed interfaces meet; generics must propagate from DB interfaces to consumer-facing manager type.
-- Default prevents breakage.
-
----
-
-## 4.5 Redis / protobuf extensibility (while preserving defaults)
-
-### Add: `src/helpers/messageCodecRegistry.ts`
-
-- In-memory registry mapping `txTp` or `contentType` to codec.
-- Register default FRMS protobuf codec on startup.
-
-### Update: `src/services/redis.ts`
-
-Add optional codec-aware methods (additive):
-
-- `setMessage<T>(key: string, value: T, txTp: string, expire?: number): Promise<void>`
-- `getMessage<T>(key: string, txTp: string): Promise<T | undefined>`
-- `setAddMessage<T>(key: string, value: T, txTp: string): Promise<void>`
-- `getMemberMessages<T>(key: string, txTp: string): Promise<T[]>`
-
-Keep existing methods exactly:
-
-- `setAdd`, `addOneGetAll`, `addOneGetCount`, `getBuffer` continue to use FRMS protobuf codec.
-
-Justification:
-- No existing behavior changes.
-- Adds explicit custom-type path with codec choice.
-
-### Optional (Phase 2): `src/helpers/proto/Full.proto`
-
-If custom message families must be represented inside FRMS protobuf itself:
-
-- Add a generic extension envelope field (e.g., `bytes customPayload`, `string customContentType`, `string customTxTp`) OR `google.protobuf.Any`.
-
-Justification:
-- Only needed if your ecosystem requires a single protobuf wire format for all message families.
-- If JSON/alternate codec is acceptable for custom types, this proto change can be deferred.
-
----
-
-## 4.6 Export surface and docs
-
-### Update: `src/index.ts`
-
-- Export generic message interfaces and codec types.
-- Keep current exports unchanged.
-
-### Update: `README.md`
-
-Add sections:
-
-- “Custom message type support”
-- “Using generic DB and request/report interfaces”
-- “Codec registry and redis message methods”
-
-Justification:
-- Public feature without docs will be misused and create migration friction.
-
----
-
-## 5. Backward Compatibility Contract
-
-The following must remain behaviorally identical:
-
-- Existing built-in interfaces and names (`Pacs002`, `Pacs008`, `Pain001`, `Pain013`).
-- Existing `CreateDatabaseManager` call shape without generics.
-- Existing raw history methods and SQL behavior.
-- Existing redis methods and FRMS protobuf handling.
-- Existing condition/event history/network map semantics.
-
-Compatibility techniques:
-
-- Additive generic methods and interfaces.
-- Default generic parameters (`= Pacs002`).
-- Wrappers from old methods to generic internals.
-- No removal in this phase.
-
----
-
-## 6. Migration Plan (Phased)
-
-### Phase 0: Foundation (No runtime behavior change)
-
-- Add generic interfaces.
-- Add defaulted generics to request/report/evaluation typing.
-- Keep all implementations functionally identical.
-
-Exit criteria:
-
-- All existing tests pass unchanged.
-- TypeScript compile passes without downstream changes.
-
-### Phase 1: Generic data path enablement
-
-- Implement `saveTransactionHistory/getTransaction` generic methods.
-- Implement generic `Evaluation` persistence typing.
-- Add codec registry and codec-aware Redis methods.
-
-Exit criteria:
-
-- Existing tests pass.
-- New tests show one custom message type persists and reads successfully.
-
-### Phase 2: Optional unified protobuf extension
-
-- Extend `Full.proto` for custom payload envelope if required.
-- Maintain default FRMS protobuf decode for existing methods.
-
-Exit criteria:
-
-- Wire-level interoperability validated for built-ins and custom payload path.
-
----
-
-## 7. Required Test Additions
-
-Add tests without removing existing ones:
-
-1. `__tests__/dbManager.custom-types.test.ts`
-   - Saves/retrieves custom transaction via generic raw-history methods.
-2. `__tests__/evaluation.custom-types.test.ts`
-   - Persists custom transaction in generic evaluation payload.
-3. `__tests__/redis.custom-codec.test.ts`
-   - Registers custom codec, writes/reads typed message.
-4. Type-level tests (or compile fixtures)
-   - Ensure defaults still infer `Pacs002` when no generic provided.
-
-Justification:
-- Prevent regressions in existing behavior while proving new custom-type capability.
-
----
-
-## 8. Risks and Mitigations
-
-- **Risk:** Generic API introduces ambiguous ID extraction for raw history retrieval.
-  - **Mitigation:** Keep explicit key arguments (`id`, `tenantId`) and configurable key extractor per tx type.
-
-- **Risk:** Codec mismatch between producer and consumer.
-  - **Mitigation:** Include `contentType` metadata conventions; registry lookup by `txTp` + content type.
-
-- **Risk:** Generic typing leaks into all consumers immediately.
-  - **Mitigation:** Default generic parameters and legacy aliases prevent mandatory migration.
-
----
-
-## 9. Recommended Interface Shapes (concrete)
-
-```ts
-export interface BaseMessageEnvelope<TPayload = unknown> {
-  TxTp: string;
-  TenantId: string;
-  payload: TPayload;
-  DataCache?: DataCache;
-}
-
-export interface RuleRequest<TTransaction = Pacs002> {
-  transaction: TTransaction;
-  networkMap: NetworkMap;
-  DataCache: DataCache;
-  metaData?: MetaData;
-}
-
-export interface EvaluationDB<TTransaction = Pacs002> {
-  saveEvaluationResult(
-    transactionID: string,
-    transaction: TTransaction,
-    networkMap: NetworkMap,
-    alert: Alert,
-    dataCache?: DataCache
-  ): Promise<void>;
-}
-
-export interface RawHistoryDB {
-  saveTransactionHistory<TTransaction>(txTp: string, transaction: TTransaction): Promise<void>;
-  getTransaction<TTransaction>(txTp: string, id: string, tenantId: string): Promise<TTransaction | undefined>;
-
-  // legacy methods retained
-  saveTransactionHistoryPain001(transaction: Pain001): Promise<void>;
-  saveTransactionHistoryPain013(transaction: Pain013): Promise<void>;
-  saveTransactionHistoryPacs008(transaction: Pacs008): Promise<void>;
-  saveTransactionHistoryPacs002(transaction: Pacs002): Promise<void>;
-}
+  NPREV[Reference: Process View B]:::note --> ST
 ```
 
----
+### 2.4 Current-State Confidence Summary
 
-## 10. Concrete Justification Matrix
-
-| Change | Why it is required | Why minimal / preserves spirit |
-|---|---|---|
-| Add generic transaction interfaces | Enables custom type acceptance at compile-time | Additive only; existing interfaces unchanged |
-| Generic raw history methods | Current API cannot store arbitrary tx families | Existing per-type methods retained as wrappers |
-| Generic evaluation/request/report typing | Current APIs force `Pacs002` | Default generic keeps current behavior |
-| Codec registry + codec-aware redis methods | Current binary set/object methods assume FRMS protobuf | Existing methods unchanged; new path opt-in |
-| Optional proto extension | Needed only for unified protobuf wire for custom types | Deferred unless required; avoids unnecessary churn |
+- The library already has a useful message-type discriminator concept (`txTp`/`TxTp`) at routing level.
+- The primary limitation is not routing; it is **hard binding of some contracts and storage paths** to known message shapes.
+- Therefore, type-agnostic support is feasible without changing the core system intent.
 
 ---
 
-## 11. Implementation Order (recommended)
+## 3. Detailed Summary: Safe Type-Agnostic Extension Strategy (No Code References)
 
-1. Add generic interfaces and defaulted generic request/report/evaluation types.
-2. Update builders and db manager type composition to propagate generics.
-3. Add generic raw-history methods and wrappers.
-4. Add codec registry and codec-aware redis APIs.
-5. Add tests for custom type support + regression tests for current behavior.
-6. Optionally extend protobuf schema if required by deployment architecture.
+This section intentionally describes the approach at system/process level for steering review.
 
-This order minimizes breakage risk and keeps behavior parity verifiable at each step.
+### 3.1 Safety Model
+
+The safest strategy is to separate message handling into two layers:
+
+1. **Core envelope contract** (always required): transaction type, tenant identity, and shared metadata.
+2. **Payload contract** (generic): message-family-specific structure supplied by producer/consumer.
+
+Why this is safe:
+
+- shared invariants remain strongly typed and mandatory,
+- payload variation is controlled through generic parameters, not dynamic untyped objects,
+- strict mode still enforces compile-time correctness per consumer-defined type.
+
+### 3.2 Compatibility Model
+
+Use a dual-path model:
+
+- **Legacy path:** existing built-in contracts continue as default.
+- **Generic path:** new generic interfaces and methods for custom message families.
+
+This avoids forcing migration while enabling innovation.
+
+### 3.3 TypeScript Strictness Model
+
+To preserve strict TypeScript guarantees:
+
+- use constrained generics with required envelope fields,
+- use default generic type parameters so current consumers keep current inference,
+- keep serialization interfaces typed (`encode/decode<T>`),
+- avoid introducing unconstrained `any` in public contracts.
+
+### 3.4 Consumer Experience Model
+
+Consumer should be able to:
+
+1. define `MyCustomMessage` type,
+2. bind library generic interfaces with that type,
+3. optionally register a codec for serialization,
+4. use custom type in persistence/evaluation paths with compile-time validation.
+
+No deep internal library knowledge should be required for this.
 
 ---
 
-## 12. Acceptance Criteria
+## 4. Detailed Investigation of the Proposed Plan (Steering-Committee View)
 
-This evolution is complete when:
+### 4.1 Is this extension feasible without destabilizing the system?
 
-- Existing consumers compile and run without changes.
-- A new consumer can define `MyCustomTransaction` and pass it through typed library APIs (rule/evaluation/raw-history/redis codec-aware methods).
-- Existing built-in type flows produce identical runtime outputs and DB writes as before.
-- Tests verify both backward compatibility and custom-type enablement.
+Yes, for three reasons:
+
+1. **Message-type discrimination already exists** as a core operational concept.
+2. **Most subsystem behavior is payload-agnostic** once shared identifiers are available.
+3. **Compatibility can be preserved with additive design** rather than replacement.
+
+### 4.2 What architectural pattern best fits this system?
+
+The recommended pattern is **Typed Envelope + Pluggable Codec + Compatibility Wrappers**.
+
+```mermaid
+flowchart LR
+  classDef current fill:#E3F2FD,stroke:#1E3A8A,color:#0F172A,stroke-width:1px;
+  classDef target fill:#E8F5E9,stroke:#166534,color:#0F172A,stroke-width:1px;
+  classDef bridge fill:#FFF7ED,stroke:#9A3412,color:#0F172A,stroke-width:1px;
+  classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
+
+  C1[Current typed built-ins]:::current --> B1[Compatibility wrappers]:::bridge --> T1[Generic typed core]:::target
+  C2[Current FRMS protobuf default]:::current --> B2[Codec registry default mapping]:::bridge --> T2[Pluggable codecs for custom families]:::target
+
+  N1[Diagram Part 1: architecture transition]:::note
+  N2[See next diagram for rollout phases]:::note
+  N1 --> C1
+  T2 --> N2
+```
+
+```mermaid
+flowchart TB
+  classDef phase fill:#ECFEFF,stroke:#155E75,color:#0F172A,stroke-width:1px;
+  classDef guard fill:#FEE2E2,stroke:#991B1B,color:#0F172A,stroke-width:1px;
+  classDef done fill:#E8F5E9,stroke:#166534,color:#0F172A,stroke-width:1px;
+  classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
+
+  P0[Phase 0: Generic type surfaces only]:::phase --> G0[Guardrail: no runtime behavior changes]:::guard
+  G0 --> P1[Phase 1: Generic persistence + codec-aware API]:::phase
+  P1 --> G1[Guardrail: built-in path remains default]:::guard
+  G1 --> P2[Phase 2: Optional unified wire-format extension]:::phase
+  P2 --> D[Outcome: safe custom type support + backward compatibility]:::done
+
+  NPREV[Reference: previous architecture transition diagram]:::note --> P0
+```
+
+### 4.3 Why not do a hard switch to a fully generic-only API?
+
+Because hard switch introduces unnecessary migration and operational risk:
+
+- all downstream services would need simultaneous adaptation,
+- any hidden assumptions in downstream typing could break production pipelines,
+- rollback complexity increases sharply.
+
+A phased additive strategy is safer and more governable.
+
+### 4.4 Governance and Reviewability
+
+This plan is suitable for governance because:
+
+- each phase has explicit entry/exit criteria,
+- compatibility can be validated by regression tests,
+- risk can be isolated and measured before advancing.
+
+---
+
+## 5. Side-Effects Review (Detailed, Non-Code-Heavy)
+
+### 5.1 Positive effects
+
+1. **Faster onboarding of new message families** without repeated library releases for each schema.
+2. **Stronger consumer typing** for custom workflows.
+3. **Reduced pressure on core maintainers** to hard-code every new payload model.
+
+### 5.2 Neutral/expected changes
+
+1. API surface area increases modestly (generic variants + legacy wrappers).
+2. Documentation and onboarding material must expand.
+3. Test suite grows to include compatibility + generic-path validation.
+
+### 5.3 Potential negative effects and controls
+
+1. **Complexity increase in public typing model**
+   - Control: keep defaults and provide “legacy quick path” docs.
+2. **Codec mismatch risk in distributed systems**
+   - Control: explicit content-type metadata and deterministic registry policy.
+3. **Operational inconsistency if teams mix old/new patterns ad hoc**
+   - Control: phased adoption guidance and reference usage patterns.
+
+### 5.4 Impact on reliability and performance
+
+- Reliability impact should be low if wrappers preserve existing semantics.
+- Performance impact is expected to be minimal in typed layers; serialization path needs benchmark checks only if additional codec indirection is introduced in hot paths.
+
+### 5.5 Impact on maintainability
+
+- Short term: moderate increase in conceptual surface.
+- Medium term: improved maintainability due to reduced need for per-message hardcoding.
+
+---
+
+## 6. Planning Blueprint: Concrete Changes Needed in the Library
+
+This is the implementation planning checklist (not execution).
+
+### 6.1 Public Type System
+
+Planned changes:
+
+1. Introduce generic envelope and transaction-like contracts.
+2. Introduce typed codec abstractions.
+3. Parameterize request/report/evaluation contracts with safe defaults.
+
+Why required:
+
+- unlocks custom message typing while retaining strict mode.
+
+### 6.2 Persistence Interfaces
+
+Planned changes:
+
+1. Add generic raw-history write/read methods.
+2. Keep legacy message-family-specific methods as compatibility wrappers.
+3. Make evaluation contract generic with backward-compatible default transaction type.
+
+Why required:
+
+- current hard-typed persistence interfaces block custom-type acceptance.
+
+### 6.3 Manager Composition and Dependency Wiring
+
+Planned changes:
+
+1. Propagate generic transaction parameter through manager composition types.
+2. Preserve non-generic invocation behavior and return typing defaults.
+
+Why required:
+
+- ensures custom type can travel end-to-end in typed API surface.
+
+### 6.4 Serialization and Redis Strategy
+
+Planned changes:
+
+1. Add codec registry abstraction.
+2. Keep current FRMS protobuf behavior as default codec path.
+3. Add explicit codec-aware APIs for custom families.
+4. Optionally add unified wire-format extension in protobuf as phase-2 decision.
+
+Why required:
+
+- allows custom payload transport without breaking built-in binary workflows.
+
+### 6.5 Documentation and Developer Experience
+
+Planned changes:
+
+1. Add migration guides for “stay legacy” and “adopt generic” modes.
+2. Add canonical usage examples for consumer-defined message types.
+3. Add strict typing guidance and troubleshooting notes.
+
+Why required:
+
+- adoption success depends on clarity as much as API design.
+
+### 6.6 Testing and Acceptance Gating
+
+Planned changes:
+
+1. Regression tests to prove unchanged legacy behavior.
+2. New tests proving one custom type can flow through generic APIs safely.
+3. Type-level checks to prove default inference remains backward-compatible.
+4. Optional benchmark checks for codec-aware paths.
+
+Why required:
+
+- necessary for technical steering confidence and controlled rollout.
+
+---
+
+## 7. Proposed Rollout Plan and Decision Gates
+
+### Phase 0 — Type Surface Preparation
+
+- Add generic types and defaults.
+- No runtime behavior changes.
+
+Gate:
+
+- all existing tests pass; no consumer migration required.
+
+### Phase 1 — Generic Data Path Enablement
+
+- Add generic persistence and codec-aware APIs.
+- Keep legacy methods unchanged and operational.
+
+Gate:
+
+- built-in compatibility tests pass;
+- custom-type integration test passes.
+
+### Phase 2 — Optional Unified Wire Format
+
+- Decide whether to extend protobuf for universal custom payload wire representation.
+
+Gate:
+
+- architecture review confirms need;
+- interoperability test plan approved.
+
+---
+
+## 8. Final Recommendation
+
+Proceed with the additive, phased plan.
+
+It is the highest-confidence route to achieve type-agnostic extensibility while preserving the system’s current operational spirit: deterministic routing by message type, durable history/evaluation persistence, and stable default runtime behavior for existing deployments.
