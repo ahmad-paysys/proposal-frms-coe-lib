@@ -19,7 +19,7 @@ Expected outcome:
 
 ---
 
-## 1. Goals and Non-Goals (Concrete)
+## 1. Goals and Non-Goals
 
 ### 1.1 Goals
 
@@ -67,7 +67,7 @@ flowchart TB
   classDef note fill:#FEF9C3,stroke:#854D0E,color:#0F172A,stroke-width:1px;
 
   IN[Incoming message + txTp + tenant context]:::input --> APP[Consumer service logic]:::core
-  APP --> RT[Consumer uses network-map metadata (including txTp) for routing decisions]:::core
+  APP --> RT["Consumer uses network-map metadata (including txTp) for routing decisions"]:::core
   APP --> EV[Consumer performs rule/evaluation workflow]:::core
   APP --> EH[Consumer calls event-history persistence APIs]:::persist
   APP --> RH[Consumer calls raw-history persistence APIs]:::persist
@@ -83,7 +83,7 @@ flowchart TB
   RC --> N2
 ```
 
-### 2.2 Process View B — Storage Behavior (Current)
+### 2.2 Process View B — Storage Behavior
 
 ```mermaid
 flowchart LR
@@ -117,13 +117,13 @@ How to read this view:
 - `Raw History`, `Event History`, and `Evaluation Store` are parallel persistence targets, not independent pipelines.
 - Each branch is now explicitly connected forward to Process View C to show continuity in the document narrative.
 
-Fact-check note:
+Reference:
 
 - `Raw History` branch is grounded in current message-family-specific persistence API and implementation. [REF-07] [REF-08]
 - `Event History` branch is grounded in transaction detail and condition graph lifecycle APIs. [REF-09] [REF-10]
 - `Evaluation Store` branch is grounded in current evaluation persistence and retrieval APIs. [REF-11] [REF-12]
 
-### 2.3 Process View C — Serialization and Type Handling (Current)
+### 2.3 Process View C — Serialization and Type Handling
 
 ```mermaid
 flowchart TB
@@ -156,26 +156,26 @@ How to read this view:
 - The diagram separates two truths that coexist today: strong built-in typing (`ST` branch) and an extension seam (`S2` branch).
 - Both branches converge on one explicit conclusion node, making the reasoning chain complete and non-ambiguous.
 
-Fact-check note:
+Reference:
 
 - Built-in typing branch is grounded in exported built-in message interfaces and request/report contracts. [REF-02] [REF-16] [REF-17] [REF-18] [REF-19]
 - Binary schema branch is grounded in FRMS protobuf usage in helpers and Redis binary paths. [REF-13] [REF-14] [REF-15]
 - Routing seam branch is grounded in `txTp`/`TxTp` presence in core message and network map interfaces. [REF-05] [REF-20]
 
-### 2.4 Current-State Confidence Summary
+### 2.4 Current-State Summary
 
 - Network-map message entries include `txTp`, and transaction interfaces include `TxTp` as string fields.
 - The primary limitation is **type binding in selected interfaces and persistence APIs**, not absence of a message-type concept.
 - Binary object/set serialization paths in Redis currently rely on the FRMS protobuf schema.
 - Therefore, type-agnostic support is feasible if generic typing and codec extension points are added while preserving legacy defaults.
 
-Fact-check references: [REF-05] [REF-20] [REF-07] [REF-08] [REF-11] [REF-12] [REF-13] [REF-14] [REF-15]
+Reference: [REF-05] [REF-20] [REF-07] [REF-08] [REF-11] [REF-12] [REF-13] [REF-14] [REF-15]
 
 ---
 
-## 3. Detailed Summary: Safe Type-Agnostic Extension Strategy (No Code References)
+## 3. Detailed Summary: Safe Type-Agnostic Extension Strategy
 
-This section intentionally describes the approach at system/process level for steering review.
+This section describes the approach at system/process level for review.
 
 ### 3.1 Safety Model
 
@@ -190,7 +190,7 @@ Why this is safe:
 - payload variation is controlled through generic parameters, not dynamic untyped objects,
 - strict mode still enforces compile-time correctness per consumer-defined type.
 
-Fact-check result:
+Reference:
 
 - The strict-mode baseline in this repository is verified (`strict: true`, `noImplicitAny: true`). [REF-21]
 - The two-layer model itself is a **proposed architecture decision** (not an existing implementation), selected to satisfy strict typing and compatibility constraints in current APIs. [ADR-01] [ADR-03]
@@ -204,7 +204,7 @@ Use a dual-path model:
 
 This avoids forcing migration while enabling innovation.
 
-Fact-check result:
+Reference:
 
 - Current API surface is message-family-specific in multiple places; therefore dual-path compatibility is required to avoid breaking consumers. [REF-07] [REF-11] [REF-16] [REF-17] [REF-18] [REF-19]
 - The dual-path approach is a proposed decision with compatibility-first intent. [ADR-02]
@@ -218,7 +218,7 @@ To preserve strict TypeScript guarantees:
 - keep serialization interfaces typed (`encode/decode<T>`),
 - avoid introducing unconstrained `any` in public contracts.
 
-Fact-check result:
+Reference:
 
 - Strict compiler settings are present today, so this design constraint is aligned with repository policy. [REF-21]
 - Default generic parameters are proposed to preserve existing call-site inference behavior where concrete types are currently fixed. [ADR-03]
@@ -234,14 +234,14 @@ Consumer should be able to:
 
 No deep internal library knowledge should be required for this.
 
-Fact-check result:
+Reference:
 
 - Current consumer-facing contracts include multiple Pacs002-bound interfaces and message-family-specific persistence methods, which supports the need for a simpler generic path. [REF-07] [REF-11] [REF-16] [REF-17] [REF-18] [REF-19]
 - The simplified consumer experience is a proposed outcome and requires the ADR decisions in Section 4/9. [ADR-01] [ADR-02] [ADR-04] [ADR-05] [ADR-06]
 
 ---
 
-## 4. Detailed Investigation of the Proposed Plan (Steering-Committee View)
+## 4. Detailed Investigation of the Proposed Plan
 
 ### 4.1 Is this extension feasible without destabilizing the system?
 
@@ -251,7 +251,7 @@ Yes, for three reasons:
 2. **Several storage and utility behaviors are payload-document-oriented**, while a subset of public contracts remain fixed to built-in types.
 3. **Compatibility can be preserved with additive design** rather than replacement.
 
-Fact-check references: [REF-05] [REF-20] [REF-07] [REF-08] [REF-11] [REF-12] [REF-13] [REF-14] [REF-15]
+Reference: [REF-05] [REF-20] [REF-07] [REF-08] [REF-11] [REF-12] [REF-13] [REF-14] [REF-15]
 
 ### 4.2 What architectural pattern best fits this system?
 
@@ -315,7 +315,7 @@ Decision references: [ADR-08]
 
 ---
 
-## 4.5 Fact-Check Evidence Map (Current Library)
+## 4.5 Fact-Check Evidence Map
 
 The following statements in this document are grounded in the current repository implementation.
 
@@ -357,7 +357,7 @@ Decision references: [ADR-02] [ADR-04] [ADR-05] [ADR-06]
 
 ---
 
-## 5. Side-Effects Review (Detailed, Non-Code-Heavy)
+## 5. Side-Effects Review
 
 ### 5.1 Positive effects
 
