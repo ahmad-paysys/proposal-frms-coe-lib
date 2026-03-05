@@ -1,6 +1,6 @@
 # Type-Agnostic Message Evolution Plan for `frms-coe-lib`
 
-## Executive Summary
+## Summary
 
 This document defines a concrete, low-risk evolution path to make `frms-coe-lib` accept first-class custom message types while preserving existing behavior for current ISO message families (`pacs.002.001.12`, `pacs.008.001.10`, `pain.001.001.11`, `pain.013.001.09`).
 
